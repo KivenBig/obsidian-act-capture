@@ -1,0 +1,22 @@
+{
+  "name": "act-capture",
+  "version": "0.1.1",
+  "description": "ACT 闪念簿 — 打开即写，捕捉一闪而过的想法。",
+  "main": "main.js",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/KivenBig/obsidian-act-capture.git"
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "watch": "node_modules/.bin/esbuild main.ts --bundle --platform=browser --format=cjs --external:obsidian --outfile=main.js --watch",
+    "dev": "node_modules/.bin/esbuild main.ts --bundle --platform=browser --format=cjs --external:obsidian --outfile=main.js --watch"
+  },
+  "type": "commonjs",
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "esbuild": "^0.28.0",
+    "obsidian": "^1.12.3",
+    "typescript": "^6.0.2"
+  }
+}
