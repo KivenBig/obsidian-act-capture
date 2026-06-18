@@ -1657,6 +1657,7 @@ export default class MobileDailyCapturePlugin extends Plugin {
 
 class MobileDailyCaptureSettingTab extends PluginSettingTab {
   plugin: MobileDailyCapturePlugin;
+  private activeTab = 0;
 
   constructor(app: App, plugin: MobileDailyCapturePlugin) {
     super(app, plugin);
@@ -1666,9 +1667,40 @@ class MobileDailyCaptureSettingTab extends PluginSettingTab {
   display(): void {
     const { containerEl } = this;
     containerEl.empty();
+    containerEl.addClass("act-capture-settings");
 
-    containerEl.createEl("h2", { text: "ACT 闪念簿" });
+    const tabs = ["配置", "更新", "支持"];
+    if (this.activeTab >= tabs.length) this.activeTab = 0;
+    const tabBar = containerEl.createDiv({ cls: "act-capture-settings__tab-bar" });
+    const contentEl = containerEl.createDiv({ cls: "act-capture-settings__content" });
 
+    for (let i = 0; i < tabs.length; i++) {
+      const tab = tabBar.createDiv({
+        text: tabs[i],
+        cls: `act-capture-settings__tab${i === this.activeTab ? " is-active" : ""}`
+      });
+      tab.addEventListener("click", () => {
+        this.activeTab = i;
+        tabBar.querySelectorAll(".act-capture-settings__tab").forEach((el, idx) => {
+          el.toggleClass("is-active", idx === i);
+        });
+        this.renderTabContent(contentEl);
+      });
+    }
+
+    this.renderTabContent(contentEl);
+  }
+
+  private renderTabContent(container: HTMLElement): void {
+    container.empty();
+    switch (this.activeTab) {
+      case 0: this.displayConfigTab(container); break;
+      case 1: this.displayUpdateSection(container); break;
+      case 2: this.displaySupportSection(container); break;
+    }
+  }
+
+  private displayConfigTab(containerEl: HTMLElement): void {
     containerEl.createEl("h3", { text: "启动" });
 
     new Setting(containerEl)
@@ -1716,9 +1748,6 @@ class MobileDailyCaptureSettingTab extends PluginSettingTab {
     } else {
       this.displayDailyModeSettings(containerEl);
     }
-
-    this.displayUpdateSection(containerEl);
-    this.displaySupportSection(containerEl);
   }
 
   private displaySingleModeSettings(containerEl: HTMLElement): void {
@@ -1874,19 +1903,17 @@ class MobileDailyCaptureSettingTab extends PluginSettingTab {
   }
 
   private displayUpdateSection(containerEl: HTMLElement): void {
-    containerEl.createEl("h3", { text: "更新" });
+    const section = containerEl.createDiv({ cls: "act-capture-update-section" });
+    const header = section.createDiv({ cls: "act-capture-update-header" });
+    header.createSpan({ text: `ACT 闪念簿  v${this.plugin.manifest.version}`, cls: "act-capture-update-version" });
 
-    const versionEl = containerEl.createDiv({ cls: "act-capture-setting-update" });
-    versionEl.createSpan({ text: `ACT 闪念簿  v${this.plugin.manifest.version}` });
-
-    const statusEl = containerEl.createDiv();
-    containerEl.createDiv({
+    const statusEl = section.createDiv({ cls: "act-capture-update-status" });
+    section.createDiv({
       text: "点击「检查更新」获取最新版本。更新不会影响你的配置和数据。",
       cls: "setting-item-description"
     });
 
-    const checkBtn = containerEl.createEl("button", { text: "检查更新" });
-    checkBtn.style.marginTop = "8px";
+    const checkBtn = section.createEl("button", { text: "检查更新", cls: "act-capture-update-btn" });
     checkBtn.addEventListener("click", async () => {
       checkBtn.disabled = true;
       checkBtn.textContent = "检查中...";

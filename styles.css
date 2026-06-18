@@ -485,10 +485,65 @@
   line-height: 1.6;
 }
 
+/* ── Settings tab bar ── */
+.act-capture-settings__tab-bar {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 20px;
+  padding: 3px;
+  border-radius: 10px;
+  background: var(--background-secondary);
+}
+
+.act-capture-settings__tab {
+  flex: 1;
+  padding: 8px 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 14px;
+  font-weight: 600;
+  text-align: center;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.act-capture-settings__tab:hover {
+  color: var(--text-normal);
+}
+
+.act-capture-settings__tab.is-active {
+  background: var(--background-primary);
+  color: var(--text-normal);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+/* ── Update section ── */
+.act-capture-update-section {
+  padding: 16px 0;
+}
+
+.act-capture-update-header {
+  margin-bottom: 12px;
+}
+
+.act-capture-update-version {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text-normal);
+}
+
+.act-capture-update-status {
+  margin: 12px 0;
+}
+
+.act-capture-update-btn {
+  margin-top: 8px;
+}
+
+/* ── Support section ── */
 .act-capture-setting-support {
-  margin-top: 28px;
   padding: 22px 18px 20px;
-  border-top: 1px solid var(--background-modifier-border);
   background: #fffaf4;
   border-radius: 14px;
   color: #2f261d;

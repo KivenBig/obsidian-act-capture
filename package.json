@@ -1,6 +1,6 @@
 {
   "name": "act-capture",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "ACT 闪念簿 — 打开即写，捕捉一闪而过的想法。",
   "main": "main.js",
   "repository": {
