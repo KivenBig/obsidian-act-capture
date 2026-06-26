@@ -1609,45 +1609,51 @@ export default class MobileDailyCapturePlugin extends Plugin {
     }
   }
 
-  private lastUpdateCheck = 0;
+  private updateCheckTimes: number[] = [];
 
   async checkForUpdate(): Promise<{ hasUpdate: boolean; latest: string; current: string }> {
     const now = Date.now();
-    if (now - this.lastUpdateCheck < UPDATE_CHECK_INTERVAL_MS) {
-      throw new Error("检查过于频繁，请稍后再试");
+    this.updateCheckTimes = this.updateCheckTimes.filter((t) => now - t < UPDATE_CHECK_INTERVAL_MS);
+    if (this.updateCheckTimes.length >= 2) {
+      const oldest = this.updateCheckTimes[0];
+      const remain = Math.ceil((UPDATE_CHECK_INTERVAL_MS - (now - oldest)) / 1000);
+      throw new Error(`请 ${remain} 秒后再试`);
     }
-    this.lastUpdateCheck = now;
-    const resp = await requestUrl({
-      url: `https://api.github.com/repos/${UPDATE_REPO}/releases/latest`,
-      headers: { "Accept": "application/vnd.github.v3+json", "User-Agent": "act-capture" },
-    });
-    const latest = resp.json.tag_name?.replace(/^v/, "") ?? "";
-    if (!latest) throw new Error("无法获取最新版本号");
-    return { hasUpdate: latest !== this.manifest.version, latest, current: this.manifest.version };
+    this.updateCheckTimes.push(now);
+    try {
+      const resp = await requestUrl({
+        url: `https://raw.githubusercontent.com/${UPDATE_REPO}/main/manifest.json`,
+      });
+      const latest = resp.json.version ?? "";
+      if (!latest) throw new Error("无法获取最新版本号");
+      return { hasUpdate: latest !== this.manifest.version, latest, current: this.manifest.version };
+    } catch (err) {
+      this.updateCheckTimes.pop();
+      throw err;
+    }
   }
 
   async performUpdate(): Promise<string> {
-    const resp = await requestUrl({
-      url: `https://api.github.com/repos/${UPDATE_REPO}/releases/latest`,
-      headers: { "Accept": "application/vnd.github.v3+json", "User-Agent": "act-capture" },
+    const manifestResp = await requestUrl({
+      url: `https://raw.githubusercontent.com/${UPDATE_REPO}/main/manifest.json`,
     });
-    const release = resp.json;
-    const latest = release.tag_name?.replace(/^v/, "") ?? "";
+    const latest = manifestResp.json.version ?? "";
     if (!latest) throw new Error("无法获取最新版本号");
     if (latest === this.manifest.version) return latest;
 
-    const assets: { name: string; browser_download_url: string }[] = release.assets ?? [];
     const pluginDir = this.manifest.dir;
     if (!pluginDir) throw new Error("无法确定插件目录");
 
     const filesToUpdate = ["main.js", "manifest.json", "styles.css"];
     let updated = 0;
     for (const filename of filesToUpdate) {
-      const asset = assets.find((a: { name: string }) => a.name === filename);
-      if (!asset) continue;
-      const fileResp = await requestUrl({ url: asset.browser_download_url, headers: { "User-Agent": "act-capture" } });
-      await this.app.vault.adapter.writeBinary(`${pluginDir}/${filename}`, fileResp.arrayBuffer);
-      updated++;
+      try {
+        const fileResp = await requestUrl({
+          url: `https://github.com/${UPDATE_REPO}/releases/latest/download/${filename}`,
+        });
+        await this.app.vault.adapter.writeBinary(`${pluginDir}/${filename}`, fileResp.arrayBuffer);
+        updated++;
+      } catch { /* file may not exist in release */ }
     }
 
     if (updated === 0) throw new Error("Release 中未找到可更新的文件");
