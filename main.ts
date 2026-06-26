@@ -1078,7 +1078,11 @@ class DailyCaptureView extends ItemView {
     composer.toggleClass("is-focus-editor", expanded);
     root?.toggleClass("is-focus-mode", expanded);
     button.setText(expanded ? "退出" : "聚焦");
-    window.setTimeout(() => this.inputEl?.focus(), 30);
+    if (expanded) {
+      window.setTimeout(() => this.inputEl?.focus(), 30);
+    } else {
+      this.inputEl?.blur();
+    }
   }
 
   async onClose(): Promise<void> {
@@ -1108,7 +1112,7 @@ class DailyCaptureView extends ItemView {
     this.visibleLimit = PAGE_SIZE;
     await this.refreshPreview();
     this.inputEl?.focus();
-    new Notice("已保存到每日闪念");
+    new Notice("保存成功");
   }
 
   private queueDraftSave(): void {
@@ -1659,6 +1663,18 @@ export default class MobileDailyCapturePlugin extends Plugin {
     if (updated === 0) throw new Error("Release 中未找到可更新的文件");
     return latest;
   }
+
+  async fetchReleaseNotes(version: string): Promise<string> {
+    try {
+      const resp = await requestUrl({
+        url: `https://raw.githubusercontent.com/${UPDATE_REPO}/main/releases.json`,
+      });
+      const notes: Record<string, string[]> = resp.json ?? {};
+      const items = notes[version];
+      if (items && items.length > 0) return items.join("\n");
+    } catch { /* ignore */ }
+    return "";
+  }
 }
 
 class MobileDailyCaptureSettingTab extends PluginSettingTab {
@@ -1928,15 +1944,29 @@ class MobileDailyCaptureSettingTab extends PluginSettingTab {
         const result = await this.plugin.checkForUpdate();
         if (result.hasUpdate) {
           statusEl.createSpan({ text: `发现新版本 v${result.latest}` });
-          statusEl.createSpan({ text: " " });
+          const preNotes = await this.plugin.fetchReleaseNotes(result.latest);
+          if (preNotes) {
+            const notesEl = statusEl.createDiv({ cls: "act-capture-update-notes" });
+            for (const line of preNotes.split("\n")) {
+              notesEl.createDiv({ text: line });
+            }
+          }
           const updateBtn = statusEl.createEl("button", { text: "立即更新" });
           updateBtn.addEventListener("click", async () => {
             updateBtn.disabled = true;
             updateBtn.textContent = "下载中...";
             try {
               const version = await this.plugin.performUpdate();
+              const notes = await this.plugin.fetchReleaseNotes(version);
               statusEl.empty();
               statusEl.createSpan({ text: `已更新到 v${version}，请重启 Obsidian 或重新加载插件` });
+              if (notes) {
+                const notesEl = statusEl.createDiv({ cls: "act-capture-update-notes" });
+                notesEl.createDiv({ text: "更新内容：", attr: { style: "font-weight:600;margin-bottom:4px" } });
+                for (const line of notes.split("\n")) {
+                  notesEl.createDiv({ text: line });
+                }
+              }
               new Notice(`ACT 闪念簿已更新到 v${version}，请重新加载插件`);
             } catch (err) {
               updateBtn.disabled = false;
