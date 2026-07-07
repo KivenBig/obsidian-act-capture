@@ -2,7 +2,7 @@
   "id": "act-capture",
   "name": "ACT 闪念簿",
   "author": "Kiven大汉堡",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "minAppVersion": "1.0.0",
   "description": "打开即写，捕捉一闪而过的想法。支持快速记录到日志或任意项目笔记。"
 }

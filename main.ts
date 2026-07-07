@@ -142,7 +142,8 @@ function applyDateFormat(format: string, date: Date): string {
 
 function formatDailyFileName(format: string, date: Date): string {
   const safeFormat = format.trim() || DEFAULT_SETTINGS.dailyFileNameFormat;
-  const fileName = applyDateFormat(safeFormat, date);
+  // 过滤文件名非法字符（保留 / 以支持子文件夹）
+  const fileName = applyDateFormat(safeFormat, date).replace(/[\\:*?"<>|]/g, "-");
   return fileName.endsWith(".md") ? fileName : `${fileName}.md`;
 }
 
@@ -187,6 +188,17 @@ function buildAttachmentEmbed(file: TFile): string {
   return `${isImage ? "!" : ""}[[${file.path}]]`;
 }
 
+// 压缩连续空行；含代码块围栏时跳过，避免破坏代码块内的空行
+function squeezeBlankLines(text: string): string {
+  if (text.includes("```") || text.includes("~~~")) return text;
+  return text.replace(/\n{4,}/g, "\n\n\n");
+}
+
+// 判断标题是否像本插件生成的时间戳标题（以数字开头且至少含 6 位数字）
+function isTimestampLikeHeading(title: string): boolean {
+  return /^\d/.test(title.trim()) && (title.match(/\d/g) ?? []).length >= 6;
+}
+
 function isHeading(line: string): boolean {
   return /^#{1,6}\s+/.test(line);
 }
@@ -226,7 +238,7 @@ function insertThought(content: string, entry: string, heading: string): string 
     if (before[before.length - 1]?.trim()) before.push("");
     before.push(entry);
     before.push("");
-    return [...before, ...after].join("\n").replace(/\n{4,}/g, "\n\n\n");
+    return squeezeBlankLines([...before, ...after].join("\n"));
   }
 
   const summaryIndex = lines.findIndex((line) => /^##\s+今日总结\s*$/.test(line.trim()));
@@ -241,7 +253,7 @@ function insertThought(content: string, entry: string, heading: string): string 
   const before = lines.slice(0, insertIndex);
   const after = lines.slice(insertIndex);
   while (before.length > 0 && before[before.length - 1] === "") before.pop();
-  return [...before, ...section, ...after].join("\n").replace(/\n{4,}/g, "\n\n\n");
+  return squeezeBlankLines([...before, ...section, ...after].join("\n"));
 }
 
 function isThoughtEntryStart(line: string): boolean {
@@ -322,7 +334,7 @@ function deleteThought(content: string, target: ThoughtEntry, heading: string): 
   let deleteEnd = endLine;
   if (lines[deleteEnd + 1] === "") deleteEnd++;
   lines.splice(startLine, deleteEnd - startLine + 1);
-  return lines.join("\n").replace(/\n{4,}/g, "\n\n\n");
+  return squeezeBlankLines(lines.join("\n"));
 }
 
 function isSingleEntryHeading(line: string): boolean {
@@ -446,7 +458,7 @@ function insertSingleNoteThought(content: string, entry: string): string {
     const before = lines.slice(0, firstEntryIndex);
     const after = lines.slice(firstEntryIndex);
     while (before.length > 0 && before[before.length - 1] === "") before.pop();
-    return [...before, "", entry, "", ...after].join("\n").replace(/\n{4,}/g, "\n\n\n");
+    return squeezeBlankLines([...before, "", entry, "", ...after].join("\n"));
   }
 
   return `${cleanContent}\n\n${entry}\n`;
@@ -459,6 +471,9 @@ function sortSingleNoteContentNewestFirst(content: string): string {
 
   const leading = lines.slice(0, firstEntryIndex).join("\n").replace(/\s+$/g, "");
   const thoughts = extractSingleNoteThoughts(content);
+  // 安全守卫：只有所有 ## 标题都是时间戳格式时才重排。
+  // 否则说明这是一篇含普通章节标题的笔记，重排会破坏原有结构。
+  if (thoughts.some((thought) => !isTimestampLikeHeading(thought.time))) return content;
   const body = thoughts.map((thought) => thought.source).join("\n\n");
   return leading ? `${leading}\n\n${body}\n` : `${body}\n`;
 }
@@ -468,7 +483,7 @@ function replaceSingleNoteThought(content: string, target: ThoughtEntry, newBody
   const { startLine, endLine } = findSingleNoteThoughtRange(content, target);
   const replacement = buildSingleNoteEntry(newBody, target.time).split("\n");
   lines.splice(startLine, endLine - startLine + 1, ...replacement);
-  return lines.join("\n").replace(/\n{4,}/g, "\n\n\n");
+  return squeezeBlankLines(lines.join("\n"));
 }
 
 function deleteSingleNoteThought(content: string, target: ThoughtEntry): string {
@@ -477,7 +492,7 @@ function deleteSingleNoteThought(content: string, target: ThoughtEntry): string 
   let deleteEnd = endLine;
   while (lines[deleteEnd + 1] === "") deleteEnd++;
   lines.splice(startLine, deleteEnd - startLine + 1);
-  return lines.join("\n").replace(/\n{4,}/g, "\n\n\n");
+  return squeezeBlankLines(lines.join("\n"));
 }
 
 class ProjectNoteNameModal extends Modal {
@@ -1615,6 +1630,43 @@ export default class MobileDailyCapturePlugin extends Plugin {
 
   private updateCheckTimes: number[] = [];
 
+  // 从 Release 附件读取 manifest.json，保证「检查到的版本」与「实际下载的文件」来自同一发布
+  private async fetchLatestReleaseVersion(): Promise<string> {
+    const resp = await requestUrl({
+      url: `https://github.com/${UPDATE_REPO}/releases/latest/download/manifest.json`,
+    });
+    const latest = resp.json?.version ?? "";
+    if (!latest) throw new Error("无法获取最新版本号");
+    return latest;
+  }
+
+  private async sha256Hex(data: ArrayBuffer): Promise<string> {
+    const digest = await crypto.subtle.digest("SHA-256", data);
+    return Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, "0")).join("");
+  }
+
+  // 读取 Release 附件 checksums.json；旧版 Release 没有该文件时返回 null（跳过校验）
+  private async fetchReleaseChecksums(): Promise<Record<string, string> | null> {
+    try {
+      const resp = await requestUrl({
+        url: `https://github.com/${UPDATE_REPO}/releases/latest/download/checksums.json`,
+      });
+      const data = resp.json;
+      if (data && typeof data === "object") return data as Record<string, string>;
+    } catch { /* 旧 Release 无 checksums.json */ }
+    return null;
+  }
+
+  private isNewerVersion(latest: string, current: string): boolean {
+    const a = latest.split(".").map((n) => parseInt(n) || 0);
+    const b = current.split(".").map((n) => parseInt(n) || 0);
+    for (let i = 0; i < Math.max(a.length, b.length); i++) {
+      const diff = (a[i] ?? 0) - (b[i] ?? 0);
+      if (diff !== 0) return diff > 0;
+    }
+    return false;
+  }
+
   async checkForUpdate(): Promise<{ hasUpdate: boolean; latest: string; current: string }> {
     const now = Date.now();
     this.updateCheckTimes = this.updateCheckTimes.filter((t) => now - t < UPDATE_CHECK_INTERVAL_MS);
@@ -1625,12 +1677,8 @@ export default class MobileDailyCapturePlugin extends Plugin {
     }
     this.updateCheckTimes.push(now);
     try {
-      const resp = await requestUrl({
-        url: `https://raw.githubusercontent.com/${UPDATE_REPO}/main/manifest.json`,
-      });
-      const latest = resp.json.version ?? "";
-      if (!latest) throw new Error("无法获取最新版本号");
-      return { hasUpdate: latest !== this.manifest.version, latest, current: this.manifest.version };
+      const latest = await this.fetchLatestReleaseVersion();
+      return { hasUpdate: this.isNewerVersion(latest, this.manifest.version), latest, current: this.manifest.version };
     } catch (err) {
       this.updateCheckTimes.pop();
       throw err;
@@ -1638,29 +1686,51 @@ export default class MobileDailyCapturePlugin extends Plugin {
   }
 
   async performUpdate(): Promise<string> {
-    const manifestResp = await requestUrl({
-      url: `https://raw.githubusercontent.com/${UPDATE_REPO}/main/manifest.json`,
-    });
-    const latest = manifestResp.json.version ?? "";
-    if (!latest) throw new Error("无法获取最新版本号");
-    if (latest === this.manifest.version) return latest;
+    const latest = await this.fetchLatestReleaseVersion();
+    if (!this.isNewerVersion(latest, this.manifest.version)) return latest;
 
     const pluginDir = this.manifest.dir;
     if (!pluginDir) throw new Error("无法确定插件目录");
 
-    const filesToUpdate = ["main.js", "manifest.json", "styles.css"];
-    let updated = 0;
-    for (const filename of filesToUpdate) {
+    // 先把所有文件下载到内存，全部成功后再写盘，避免部分更新导致版本错位
+    const requiredFiles = ["main.js", "manifest.json"];
+    const optionalFiles = ["styles.css"];
+    const downloaded = new Map<string, ArrayBuffer>();
+
+    for (const filename of requiredFiles) {
+      const fileResp = await requestUrl({
+        url: `https://github.com/${UPDATE_REPO}/releases/latest/download/${filename}`,
+      });
+      if (!fileResp.arrayBuffer || fileResp.arrayBuffer.byteLength === 0) {
+        throw new Error(`下载的 ${filename} 为空，已取消更新`);
+      }
+      downloaded.set(filename, fileResp.arrayBuffer);
+    }
+    for (const filename of optionalFiles) {
       try {
         const fileResp = await requestUrl({
           url: `https://github.com/${UPDATE_REPO}/releases/latest/download/${filename}`,
         });
-        await this.app.vault.adapter.writeBinary(`${pluginDir}/${filename}`, fileResp.arrayBuffer);
-        updated++;
-      } catch { /* file may not exist in release */ }
+        if (fileResp.arrayBuffer && fileResp.arrayBuffer.byteLength > 0) {
+          downloaded.set(filename, fileResp.arrayBuffer);
+        }
+      } catch { /* styles.css 可以不存在 */ }
     }
 
-    if (updated === 0) throw new Error("Release 中未找到可更新的文件");
+    // SHA-256 完整性校验：Release 提供 checksums.json 时逐一比对，不匹配立即中止
+    const checksums = await this.fetchReleaseChecksums();
+    if (checksums) {
+      for (const [filename, data] of downloaded) {
+        const expected = checksums[filename]?.toLowerCase();
+        if (!expected) throw new Error(`checksums.json 中缺少 ${filename} 的校验值，已取消更新`);
+        const actual = await this.sha256Hex(data);
+        if (actual !== expected) throw new Error(`${filename} 校验失败（文件可能已损坏或被篡改），已取消更新`);
+      }
+    }
+
+    for (const [filename, data] of downloaded) {
+      await this.app.vault.adapter.writeBinary(`${pluginDir}/${filename}`, data);
+    }
     return latest;
   }
 
