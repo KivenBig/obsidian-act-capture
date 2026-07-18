@@ -30,18 +30,41 @@ const DESKTOP_AUTO_FOCUS_DELAY_MS = 120;
 const UPDATE_REPO = "KivenBig/obsidian-act-capture";
 const UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000;
 
-type StorageMode = "daily" | "single";
+type StorageMode = "daily" | "weekly" | "single";
+type LogPeriod = "daily" | "weekly";
+type LogConfigSource = "custom" | "obsidian";
+
+interface LogNoteSettings {
+  folder: string;
+  format: string;
+  template: string;
+}
+
+interface MomentValue {
+  format(format: string): string;
+  add(amount: number, unit: string): MomentValue;
+  set(values: Record<string, number>): MomentValue;
+}
+
+interface MomentFactory {
+  (date?: Date): MomentValue;
+}
 
 interface MobileDailyCaptureSettings {
   storageMode: StorageMode;
+  dailyConfigSource: LogConfigSource;
+  weeklyConfigSource: LogConfigSource;
   dailyFolder: string;
   dailyFileNameFormat: string;
+  weeklyFolder: string;
+  weeklyFileNameFormat: string;
   thoughtHeading: string;
   singleNotePath: string;
   singleEntryHeadingFormat: string;
   projectNotesFolder: string;
   selectedProjectNotePath: string;
   dailyTemplatePath: string;
+  weeklyTemplatePath: string;
   openOnMobileStartup: boolean;
   openOnDesktopStartup: boolean;
   draftText: string;
@@ -50,9 +73,14 @@ interface MobileDailyCaptureSettings {
 
 const DEFAULT_SETTINGS: MobileDailyCaptureSettings = {
   storageMode: "daily",
+  dailyConfigSource: "custom",
+  weeklyConfigSource: "custom",
   dailyFolder: "Daily Notes",
   dailyFileNameFormat: "YYYY-MM-DD",
+  weeklyFolder: "Weekly Notes",
+  weeklyFileNameFormat: "gggg-[W]ww",
   dailyTemplatePath: "",
+  weeklyTemplatePath: "",
   thoughtHeading: "每日闪念",
   singleNotePath: "每日闪念.md",
   singleEntryHeadingFormat: "YYYYMMDD HH:mm",
@@ -113,6 +141,22 @@ function formatCompactDate(date: Date): string {
   return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}`;
 }
 
+function getMomentFactory(): MomentFactory | null {
+  const moment = (window as Window & { moment?: MomentFactory }).moment;
+  return typeof moment === "function" ? moment : null;
+}
+
+function getIsoWeekInfo(date: Date): { year: number; week: number } {
+  const target = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
+  const weekday = target.getUTCDay() || 7;
+  target.setUTCDate(target.getUTCDate() + 4 - weekday);
+  const yearStart = new Date(Date.UTC(target.getUTCFullYear(), 0, 1));
+  return {
+    year: target.getUTCFullYear(),
+    week: Math.ceil((((target.getTime() - yearStart.getTime()) / 86400000) + 1) / 7)
+  };
+}
+
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -121,7 +165,7 @@ function cleanHeadingText(value: string): string {
   return value.trim().replace(/^#{1,6}\s*/, "").trim() || DEFAULT_SETTINGS.thoughtHeading;
 }
 
-function applyDateFormat(format: string, date: Date): string {
+function expandLegacyDateVariables(format: string, date: Date): string {
   return format
     .replace(/\{date\}/g, formatDateOnly(date))
     .replace(/\{compactDate\}/g, formatCompactDate(date))
@@ -131,7 +175,19 @@ function applyDateFormat(format: string, date: Date): string {
     .replace(/\{month\}/g, pad(date.getMonth() + 1))
     .replace(/\{day\}/g, pad(date.getDate()))
     .replace(/\{weekdayFull\}/g, getWeekdayFullName(date))
-    .replace(/\{weekday\}/g, getWeekdayShortName(date))
+    .replace(/\{weekday\}/g, getWeekdayShortName(date));
+}
+
+function applyDateFormat(format: string, date: Date): string {
+  const expandedFormat = expandLegacyDateVariables(format, date);
+  const moment = getMomentFactory();
+  if (moment) return moment(date).format(expandedFormat);
+
+  const isoWeek = getIsoWeekInfo(date);
+  return expandedFormat
+    .replace(/GGGG|gggg/g, `${isoWeek.year}`)
+    .replace(/WW|ww/g, pad(isoWeek.week))
+    .replace(/W|w/g, `${isoWeek.week}`)
     .replace(/YYYY/g, `${date.getFullYear()}`)
     .replace(/YY/g, `${date.getFullYear()}`.slice(-2))
     .replace(/MM/g, pad(date.getMonth() + 1))
@@ -140,11 +196,15 @@ function applyDateFormat(format: string, date: Date): string {
     .replace(/mm/g, pad(date.getMinutes()));
 }
 
-function formatDailyFileName(format: string, date: Date): string {
-  const safeFormat = format.trim() || DEFAULT_SETTINGS.dailyFileNameFormat;
+function formatLogFileName(format: string, date: Date, fallbackFormat: string): string {
+  const safeFormat = format.trim() || fallbackFormat;
   // 过滤文件名非法字符（保留 / 以支持子文件夹）
   const fileName = applyDateFormat(safeFormat, date).replace(/[\\:*?"<>|]/g, "-");
   return fileName.endsWith(".md") ? fileName : `${fileName}.md`;
+}
+
+function formatDailyFileName(format: string, date: Date): string {
+  return formatLogFileName(format, date, DEFAULT_SETTINGS.dailyFileNameFormat);
 }
 
 function formatSingleEntryHeading(format: string, date: Date): string {
@@ -1438,6 +1498,82 @@ export default class MobileDailyCapturePlugin extends Plugin {
     return sorted;
   }
 
+  getLogConfigSource(period: LogPeriod): LogConfigSource {
+    return period === "daily" ? this.settings.dailyConfigSource : this.settings.weeklyConfigSource;
+  }
+
+  private getCustomLogSettings(period: LogPeriod): LogNoteSettings {
+    if (period === "weekly") {
+      return {
+        folder: normalizeFolderPath(this.settings.weeklyFolder),
+        format: this.settings.weeklyFileNameFormat.trim() || DEFAULT_SETTINGS.weeklyFileNameFormat,
+        template: this.settings.weeklyTemplatePath.trim()
+      };
+    }
+    return {
+      folder: normalizeFolderPath(this.settings.dailyFolder),
+      format: this.settings.dailyFileNameFormat.trim() || DEFAULT_SETTINGS.dailyFileNameFormat,
+      template: this.settings.dailyTemplatePath.trim()
+    };
+  }
+
+  getObsidianLogSettings(period: LogPeriod): LogNoteSettings | null {
+    const appWithPlugins = this.app as App & {
+      internalPlugins?: {
+        getPluginById?: (id: string) => { instance?: { options?: Partial<LogNoteSettings> } } | undefined;
+        plugins?: Record<string, { instance?: { options?: Partial<LogNoteSettings> } }>;
+      };
+      plugins?: {
+        getPlugin?: (id: string) => {
+          settings?: { weekly?: Partial<LogNoteSettings> };
+          options?: { weeklyNoteFormat?: string; weeklyNoteFolder?: string; weeklyNoteTemplate?: string };
+        } | null;
+      };
+    };
+
+    if (period === "daily") {
+      const dailyPlugin = appWithPlugins.internalPlugins?.getPluginById?.("daily-notes")
+        ?? appWithPlugins.internalPlugins?.plugins?.["daily-notes"];
+      const options = dailyPlugin?.instance?.options;
+      if (!options) return null;
+      return {
+        folder: normalizeFolderPath(options.folder ?? ""),
+        format: options.format?.trim() || DEFAULT_SETTINGS.dailyFileNameFormat,
+        template: options.template?.trim() || ""
+      };
+    }
+
+    const periodicNotes = appWithPlugins.plugins?.getPlugin?.("periodic-notes");
+    const weekly = periodicNotes?.settings?.weekly;
+    if (weekly) {
+      return {
+        folder: normalizeFolderPath(weekly.folder ?? ""),
+        format: weekly.format?.trim() || DEFAULT_SETTINGS.weeklyFileNameFormat,
+        template: weekly.template?.trim() || ""
+      };
+    }
+
+    const calendar = appWithPlugins.plugins?.getPlugin?.("calendar")?.options;
+    if (!calendar) return null;
+    return {
+      folder: normalizeFolderPath(calendar.weeklyNoteFolder ?? ""),
+      format: calendar.weeklyNoteFormat?.trim() || DEFAULT_SETTINGS.weeklyFileNameFormat,
+      template: calendar.weeklyNoteTemplate?.trim() || ""
+    };
+  }
+
+  getActiveLogSettings(period: LogPeriod): LogNoteSettings {
+    if (this.getLogConfigSource(period) === "obsidian") {
+      return this.getObsidianLogSettings(period) ?? this.getCustomLogSettings(period);
+    }
+    return this.getCustomLogSettings(period);
+  }
+
+  getLogSettingsSourceName(period: LogPeriod): string {
+    if (period === "daily") return "Obsidian 核心「每日笔记」";
+    return "Periodic Notes「每周笔记」或 Calendar「每周笔记」";
+  }
+
   async getCaptureFile(createIfMissing: boolean): Promise<TFile | null> {
     const path = this.getCapturePath(new Date());
     const existing = this.app.vault.getAbstractFileByPath(path);
@@ -1445,27 +1581,68 @@ export default class MobileDailyCapturePlugin extends Plugin {
     if (!createIfMissing) return null;
 
     await this.ensureParentFolder(path);
-    const template = await this.getCaptureTemplate();
+    const template = await this.getCaptureTemplate(new Date());
     await this.app.vault.create(path, template);
     const created = this.app.vault.getAbstractFileByPath(path);
     if (created instanceof TFile) return created;
     throw new Error(`Failed to create capture note: ${path}`);
   }
 
-  private async getCaptureTemplate(): Promise<string> {
+  private async getCaptureTemplate(date: Date): Promise<string> {
     if (this.settings.storageMode === "single") {
       const title = this.settings.singleNotePath.split("/").pop()?.replace(/\.md$/i, "") || DEFAULT_SETTINGS.thoughtHeading;
       return `# ${title}\n\n`;
     }
 
-    const templatePath = this.settings.dailyTemplatePath.trim();
-    if (templatePath) {
-      const templateFile = this.app.vault.getAbstractFileByPath(templatePath);
-      if (templateFile instanceof TFile) {
-        return await this.app.vault.cachedRead(templateFile);
-      }
-    }
-    return `# ${formatDateOnly(new Date())}\n\n## ${this.getThoughtHeading()}\n\n`;
+    const period: LogPeriod = this.settings.storageMode === "weekly" ? "weekly" : "daily";
+    const logSettings = this.getActiveLogSettings(period);
+    const template = await this.readLogTemplate(logSettings.template);
+    if (template !== null) return this.applyLogTemplateVariables(template, date, logSettings.format);
+
+    const title = formatLogFileName(logSettings.format, date, period === "weekly"
+      ? DEFAULT_SETTINGS.weeklyFileNameFormat
+      : DEFAULT_SETTINGS.dailyFileNameFormat).replace(/\.md$/i, "");
+    return `# ${title}\n\n## ${this.getThoughtHeading()}\n\n`;
+  }
+
+  private async readLogTemplate(templatePath: string): Promise<string | null> {
+    const normalizedPath = normalizePath(templatePath.trim());
+    if (!normalizedPath) return null;
+    const templateFile = this.app.metadataCache.getFirstLinkpathDest(normalizedPath, "")
+      ?? this.app.vault.getAbstractFileByPath(normalizedPath);
+    return templateFile instanceof TFile ? this.app.vault.cachedRead(templateFile) : null;
+  }
+
+  private applyLogTemplateVariables(template: string, date: Date, format: string): string {
+    const filename = formatLogFileName(format, date, DEFAULT_SETTINGS.dailyFileNameFormat).replace(/\.md$/i, "");
+    const moment = getMomentFactory();
+    const now = moment?.();
+
+    return template
+      .replace(/\{\{\s*date\s*\}\}/gi, filename)
+      .replace(/\{\{\s*title\s*\}\}/gi, filename)
+      .replace(/\{\{\s*time\s*\}\}/gi, formatTime(new Date()))
+      .replace(/\{\{\s*(date|time)\s*(([+-]\d+)([yqmwdhs]))?\s*(:.+?)?\}\}/gi,
+        (_match, _kind: string, calculation: string | undefined, amount: string | undefined, unit: string | undefined, formatPart: string | undefined) => {
+          if (!moment) return filename;
+          const current = moment(date).set({
+            hour: Number(now?.format("H") ?? date.getHours()),
+            minute: Number(now?.format("m") ?? date.getMinutes()),
+            second: Number(now?.format("s") ?? date.getSeconds())
+          });
+          if (calculation && amount && unit) current.add(Number(amount), unit);
+          return formatPart ? current.format(formatPart.slice(1).trim()) : current.format(format);
+        })
+      .replace(/\{\{\s*yesterday\s*\}\}/gi, this.formatRelativeLogDate(date, -1, format))
+      .replace(/\{\{\s*tomorrow\s*\}\}/gi, this.formatRelativeLogDate(date, 1, format));
+  }
+
+  private formatRelativeLogDate(date: Date, offset: number, format: string): string {
+    const moment = getMomentFactory();
+    if (moment) return moment(date).add(offset, "day").format(format);
+    const target = new Date(date);
+    target.setDate(target.getDate() + offset);
+    return applyDateFormat(format, target);
   }
 
   extractThoughts(content: string): ThoughtEntry[] {
@@ -1483,7 +1660,8 @@ export default class MobileDailyCapturePlugin extends Plugin {
   }
 
   getStorageModeLabel(): string {
-    return this.settings.storageMode === "single" ? "单一笔记" : "每日日志";
+    if (this.settings.storageMode === "single") return "单一笔记";
+    return this.settings.storageMode === "weekly" ? "每周笔记" : "每日日志";
   }
 
   getCaptureDisplayName(date: Date): string {
@@ -1496,16 +1674,20 @@ export default class MobileDailyCapturePlugin extends Plugin {
     return formatSingleEntryHeading(this.settings.singleEntryHeadingFormat, date);
   }
 
-  getTodayDailyPath(date: Date): string {
+  getCurrentLogPath(date: Date): string {
+    const period: LogPeriod = this.settings.storageMode === "weekly" ? "weekly" : "daily";
+    const logSettings = this.getActiveLogSettings(period);
     return joinVaultPath(
-      this.settings.dailyFolder,
-      formatDailyFileName(this.settings.dailyFileNameFormat, date)
+      logSettings.folder,
+      formatLogFileName(logSettings.format, date, period === "weekly"
+        ? DEFAULT_SETTINGS.weeklyFileNameFormat
+        : DEFAULT_SETTINGS.dailyFileNameFormat)
     );
   }
 
   getCapturePath(date: Date): string {
     if (this.settings.storageMode === "single") return this.getSingleCapturePath();
-    return this.getTodayDailyPath(date);
+    return this.getCurrentLogPath(date);
   }
 
   getSingleCapturePath(): string {
@@ -1821,10 +2003,11 @@ class MobileDailyCaptureSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("保存模式")
-      .setDesc("选择把闪念保存到每天的日志，或保存到一篇固定笔记。")
+      .setDesc("选择把闪念保存到每日日志、每周笔记，或保存到一篇固定笔记。")
       .addDropdown((dropdown) => {
         dropdown
           .addOption("daily", "每日日志")
+          .addOption("weekly", "每周笔记")
           .addOption("single", "单一笔记")
           .setValue(this.plugin.settings.storageMode)
           .onChange(async (value) => {
@@ -1838,7 +2021,7 @@ class MobileDailyCaptureSettingTab extends PluginSettingTab {
     if (this.plugin.settings.storageMode === "single") {
       this.displaySingleModeSettings(containerEl);
     } else {
-      this.displayDailyModeSettings(containerEl);
+      this.displayLogModeSettings(containerEl, this.plugin.settings.storageMode);
     }
   }
 
@@ -1913,65 +2096,117 @@ class MobileDailyCaptureSettingTab extends PluginSettingTab {
       });
   }
 
-  private displayDailyModeSettings(containerEl: HTMLElement): void {
-    containerEl.createEl("h3", { text: "每日日志模式" });
+  private displayLogModeSettings(containerEl: HTMLElement, period: LogPeriod): void {
+    const isWeekly = period === "weekly";
+    const modeName = isWeekly ? "每周笔记" : "每日日志";
+    const itemName = isWeekly ? "笔记" : "日志";
+    const customFolder = isWeekly ? this.plugin.settings.weeklyFolder : this.plugin.settings.dailyFolder;
+    const customFormat = isWeekly ? this.plugin.settings.weeklyFileNameFormat : this.plugin.settings.dailyFileNameFormat;
+    const customTemplate = isWeekly ? this.plugin.settings.weeklyTemplatePath : this.plugin.settings.dailyTemplatePath;
+    const defaultFormat = isWeekly ? DEFAULT_SETTINGS.weeklyFileNameFormat : DEFAULT_SETTINGS.dailyFileNameFormat;
+    const folderListId = isWeekly ? "act-capture-weekly-folder-options" : "act-capture-daily-folder-options";
+    const templateListId = isWeekly ? "act-capture-weekly-template-options" : "act-capture-daily-template-options";
+    const useObsidianSettings = this.plugin.getLogConfigSource(period) === "obsidian";
+
+    containerEl.createEl("h3", { text: `${modeName}模式` });
 
     new Setting(containerEl)
-      .setName("日志文件夹")
-      .setDesc("每日日志所在文件夹。留空则保存到 Vault 根目录。")
+      .setName(`${itemName}配置`)
+      .setDesc(isWeekly
+        ? "可自行设置，或直接读取 Periodic Notes 的每周笔记配置；未安装时会尝试读取 Calendar 的每周笔记配置。"
+        : "可自行设置，或直接读取 Obsidian 核心「每日笔记」的文件夹、命名格式和模板。")
+      .addDropdown((dropdown) => {
+        dropdown
+          .addOption("custom", "自定义")
+          .addOption("obsidian", `直接使用 Obsidian ${itemName}设置`)
+          .setValue(this.plugin.getLogConfigSource(period))
+          .onChange(async (value) => {
+            if (period === "weekly") this.plugin.settings.weeklyConfigSource = value as LogConfigSource;
+            else this.plugin.settings.dailyConfigSource = value as LogConfigSource;
+            await this.plugin.saveSettings();
+            this.plugin.refreshOpenViews();
+            this.display();
+          });
+      });
+
+    if (useObsidianSettings) {
+      const linkedSettings = this.plugin.getObsidianLogSettings(period);
+      const sourceName = this.plugin.getLogSettingsSourceName(period);
+      const description = linkedSettings
+        ? `当前读取 ${sourceName}：文件夹 ${linkedSettings.folder || "Vault 根目录"}；格式 ${linkedSettings.format}；模板 ${linkedSettings.template || "未设置"}。修改原日志设置后，这里会自动跟随。`
+        : `未读取到 ${sourceName} 的配置。请启用对应日志插件并完成设置，或切换回“自定义”。`;
+      new Setting(containerEl).setName(`当前${itemName}设置`).setDesc(description);
+      return;
+    }
+
+    new Setting(containerEl)
+      .setName(`${itemName}文件夹`)
+      .setDesc(`${modeName}所在文件夹。留空则保存到 Vault 根目录。`)
       .addSearch((search) => {
         const folders = this.plugin.getVaultFolders();
-        const currentFolder = normalizeFolderPath(this.plugin.settings.dailyFolder);
-        const listId = "act-capture-daily-folder-options";
+        const currentFolder = normalizeFolderPath(customFolder);
         const optionsEl = containerEl.createEl("datalist");
-        optionsEl.id = listId;
+        optionsEl.id = folderListId;
 
         if (currentFolder && !folders.some((folder) => folder.path === currentFolder)) {
           optionsEl.createEl("option", { attr: { value: currentFolder } });
         }
+        for (const folder of folders) optionsEl.createEl("option", { attr: { value: folder.path } });
 
-        for (const folder of folders) {
-          optionsEl.createEl("option", { attr: { value: folder.path } });
-        }
-
-        search.inputEl.setAttribute("list", listId);
+        search.inputEl.setAttribute("list", folderListId);
         search.inputEl.setAttribute("autocomplete", "off");
         search
           .setPlaceholder("输入或选择文件夹，留空为根目录")
           .setValue(currentFolder)
           .onChange(async (value) => {
-            this.plugin.settings.dailyFolder = normalizeFolderPath(value);
+            if (isWeekly) this.plugin.settings.weeklyFolder = normalizeFolderPath(value);
+            else this.plugin.settings.dailyFolder = normalizeFolderPath(value);
             await this.plugin.saveSettings();
             this.plugin.refreshOpenViews();
           });
       });
 
-    new Setting(containerEl)
-      .setName("日志文件名格式")
-      .setDesc("建议使用常见格式：YYYYMMDD。也支持 YYYY、YY、MM、DD、HH、mm，以及旧变量 {date}、{weekday} 等。")
+    let updateDescriptionPreview = (_format: string): void => undefined;
+    const formatSetting = new Setting(containerEl)
+      .setName("自定义格式")
       .addText((text) => {
-        const preview = containerEl.createDiv({ cls: "act-capture-setting-preview" });
-        const updatePreview = (format: string) => {
-          preview.setText(`当前效果：${formatDailyFileName(format, new Date())}`);
-        };
-        updatePreview(this.plugin.settings.dailyFileNameFormat);
         text
-          .setPlaceholder("YYYYMMDD")
-          .setValue(this.plugin.settings.dailyFileNameFormat)
+          .setPlaceholder(isWeekly ? "gggg-[W]ww" : "YYYYMMDD")
+          .setValue(customFormat)
           .onChange(async (value) => {
-            this.plugin.settings.dailyFileNameFormat = value.trim() || DEFAULT_SETTINGS.dailyFileNameFormat;
-            updatePreview(this.plugin.settings.dailyFileNameFormat);
+            const normalizedFormat = value.trim() || defaultFormat;
+            if (isWeekly) this.plugin.settings.weeklyFileNameFormat = normalizedFormat;
+            else this.plugin.settings.dailyFileNameFormat = normalizedFormat;
+            updateDescriptionPreview(normalizedFormat);
             await this.plugin.saveSettings();
             this.plugin.refreshOpenViews();
           });
+        text.inputEl.addEventListener("input", () => {
+          updateDescriptionPreview(text.inputEl.value.trim() || defaultFormat);
+        });
       });
+    formatSetting.descEl.empty();
+    formatSetting.descEl.createSpan({ text: "更多语法，请参阅：" });
+    const formatLink = formatSetting.descEl.createEl("a", {
+      text: "时间格式参考",
+      href: "https://momentjs.com/docs/#/displaying/format/"
+    });
+    formatLink.setAttribute("target", "_blank");
+    formatLink.setAttribute("rel", "noopener");
+    formatSetting.descEl.createEl("br");
+    formatSetting.descEl.createSpan({ text: "这是当前所用格式的样例：" });
+    const formatPreview = formatSetting.descEl.createSpan({ cls: "act-capture-setting-format-example" });
+    updateDescriptionPreview = (format: string) => {
+      formatPreview.setText(formatLogFileName(format, new Date(), defaultFormat).replace(/\.md$/i, ""));
+    };
+    updateDescriptionPreview(customFormat);
 
     new Setting(containerEl)
       .setName("保存标题")
-      .setDesc("闪念保存到这个 Markdown 标题下面。可填写“每日闪念”或“## 每日闪念”。")
+      .setDesc(`闪念保存到这个 Markdown 标题下面。可填写“${isWeekly ? "每周闪念" : "每日闪念"}”或“## ${isWeekly ? "每周闪念" : "每日闪念"}”。`)
       .addText((text) => {
         text
-          .setPlaceholder("每日闪念")
+          .setPlaceholder(isWeekly ? "每周闪念" : "每日闪念")
           .setValue(this.plugin.settings.thoughtHeading)
           .onChange(async (value) => {
             this.plugin.settings.thoughtHeading = cleanHeadingText(value);
@@ -1981,14 +2216,26 @@ class MobileDailyCaptureSettingTab extends PluginSettingTab {
       });
 
     new Setting(containerEl)
-      .setName("日志模板路径")
-      .setDesc("新建日志时使用的 Markdown 模板文件路径（相对于 Vault 根目录）。留空则自动生成基础格式。")
-      .addText((text) => {
-        text
-          .setPlaceholder("templates/daily.md")
-          .setValue(this.plugin.settings.dailyTemplatePath)
+      .setName(`${itemName}模板路径`)
+      .setDesc(`新建${itemName}时使用的 Markdown 模板。可输入路径，也可从 Vault 内现有 Markdown 笔记中筛选；留空则自动生成基础格式。`)
+      .addSearch((search) => {
+        const templates = this.plugin.app.vault.getMarkdownFiles()
+          .sort((a, b) => a.path.localeCompare(b.path, "zh-CN"));
+        const optionsEl = containerEl.createEl("datalist");
+        optionsEl.id = templateListId;
+        if (customTemplate && !templates.some((file) => file.path === customTemplate)) {
+          optionsEl.createEl("option", { attr: { value: customTemplate } });
+        }
+        for (const template of templates) optionsEl.createEl("option", { attr: { value: template.path } });
+
+        search.inputEl.setAttribute("list", templateListId);
+        search.inputEl.setAttribute("autocomplete", "off");
+        search
+          .setPlaceholder(isWeekly ? "templates/weekly.md" : "templates/daily.md")
+          .setValue(customTemplate)
           .onChange(async (value) => {
-            this.plugin.settings.dailyTemplatePath = value.trim();
+            if (isWeekly) this.plugin.settings.weeklyTemplatePath = value.trim();
+            else this.plugin.settings.dailyTemplatePath = value.trim();
             await this.plugin.saveSettings();
           });
       });

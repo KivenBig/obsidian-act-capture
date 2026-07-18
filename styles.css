@@ -438,6 +438,12 @@
   font-size: 12px;
 }
 
+.act-capture-setting-format-example {
+  margin-left: 4px;
+  color: var(--interactive-accent);
+  font-weight: 600;
+}
+
 .act-capture-note-select {
   display: flex;
   flex-direction: column;
